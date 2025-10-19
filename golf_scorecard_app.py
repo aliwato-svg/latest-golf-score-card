@@ -19,118 +19,115 @@ def save_data(data):
     with open(DATA_FILE, "w") as f:
         json.dump(data, f, indent=4)
 
-# --- Load or initialize persistent data ---
+# --- Load persistent data ---
 golf_data = load_data()
-
-# Keep a dictionary for each date for 365 days
 today = str(date.today())
 if today not in golf_data:
     golf_data[today] = {}
 
-# --- Title and Intro ---
-st.title("🏌️‍♂️ Annual Golf Score Tracker")
+# --- Title ---
+st.title("🏌️‍♂️ Golf Scorecard — Table Input Version")
 st.markdown("""
-Track your golf rounds day-by-day for up to 365 days!  
-Start fresh each day, record hole-by-hole scores, and keep track of all rounds easily.
+Track your golf rounds more easily by entering **all scores in one table**.  
+Supports 1–4 players and stores daily rounds automatically for 365 days.
 """)
 
-# --- Setup players ---
+# --- Player Setup ---
 if "setup_done" not in st.session_state:
     st.session_state.setup_done = False
 
 if not st.session_state.setup_done:
     st.header("👥 Player Setup")
-    num_players = st.number_input("Enter number of players (1–4):", min_value=1, max_value=4, step=1)
+    num_players = st.number_input("Number of Players (1–4):", min_value=1, max_value=4, step=1)
     player_names = []
     for i in range(num_players):
-        player_names.append(st.text_input(f"Enter name for Player {i+1}:", key=f"p{i}"))
+        player_names.append(st.text_input(f"Enter name for Player {i+1}:", key=f"player_{i}"))
 
     if st.button("Start Round"):
         if all(player_names):
             st.session_state.players = player_names
-            st.session_state.scores = {player: [None] * 18 for player in player_names}
-            st.session_state.pars = [None] * 18
-            st.session_state.played_holes = set()
             st.session_state.setup_done = True
-            st.success("✅ Players set! Start recording holes below.")
+            st.success("✅ Players set! Enter scores in the table below.")
         else:
-            st.error("Please enter all player names before continuing.")
+            st.error("Please fill all player names before starting.")
 else:
-    st.header(f"🎯 Scoring for {today}")
     players = st.session_state.players
+    total_holes = 18
 
-    hole = st.number_input("Enter Hole Number (1–18):", min_value=1, max_value=18, step=1)
-    par = st.selectbox("Enter Par for this hole:", [3, 4, 5])
+    st.header(f"📋 Enter Scores for {today}")
 
-    st.write("### Enter Strokes per Player")
-    hole_scores = {}
-    cols = st.columns(len(players))
-    for i, player in enumerate(players):
-        with cols[i]:
-            hole_scores[player] = st.number_input(f"{player}", min_value=1, max_value=15, step=1, key=f"{player}_{hole}")
+    # --- Create editable score table ---
+    columns = ["Hole", "Par"] + players
+    holes = [f"Hole {i+1}" for i in range(total_holes)]
+    df_template = pd.DataFrame(columns=columns)
+    df_template["Hole"] = holes
+    df_template["Par"] = [4] * total_holes  # default par 4
 
-    if st.button("💾 Record This Hole"):
-        for player in players:
-            st.session_state.scores[player][hole - 1] = hole_scores[player]
-        st.session_state.pars[hole - 1] = par
-        st.session_state.played_holes.add(hole)
-        st.success(f"Hole {hole} recorded successfully!")
+    # --- Editable DataFrame ---
+    edited_df = st.data_editor(
+        df_template,
+        use_container_width=True,
+        num_rows="fixed",
+        key="score_editor",
+        hide_index=True,
+    )
 
-        # Save to persistent data
-        golf_data[today] = {
-            "players": players,
-            "scores": st.session_state.scores,
-            "pars": st.session_state.pars
-        }
-        save_data(golf_data)
+    # --- Save Button ---
+    if st.button("💾 Save Scores"):
+        try:
+            # Validate entries
+            edited_df["Par"] = edited_df["Par"].astype(int)
+            for player in players:
+                edited_df[player] = edited_df[player].astype(int)
 
-    # --- Display live table ---
-    if st.session_state.played_holes:
-        st.divider()
-        st.subheader("📊 Live Scoreboard")
+            # Calculate totals
+            total_scores = {player: edited_df[player].sum() for player in players}
+            total_par = edited_df["Par"].sum()
+            to_par = {p: total_scores[p] - total_par for p in players}
 
-        played = sorted(list(st.session_state.played_holes))
-        df = pd.DataFrame({
-            player: [st.session_state.scores[player][i - 1] for i in played]
-            for player in players
-        }, index=[f"Hole {i} (Par {st.session_state.pars[i - 1]})" for i in played])
-        df.loc["Total"] = df.sum()
+            # Save in persistent JSON
+            golf_data[today] = {
+                "players": players,
+                "scores": edited_df.to_dict(),
+                "total_scores": total_scores,
+                "to_par": to_par,
+            }
+            save_data(golf_data)
 
-        # Calculate “To Par”
-        par_total = sum([st.session_state.pars[i - 1] for i in played if st.session_state.pars[i - 1] is not None])
-        to_par = {player: df.loc["Total", player] - par_total for player in players}
+            # Display Results
+            st.success("✅ Scores saved successfully!")
+            st.subheader("🏁 Final Results")
+            st.dataframe(edited_df)
 
-        st.dataframe(df.style.format(na_rep="—").set_properties(**{"text-align": "center"}))
+            # Display Totals and To-Par
+            results_df = pd.DataFrame({
+                "Total Strokes": [total_scores[p] for p in players],
+                "To Par": [f"{'+' if to_par[p] > 0 else ''}{to_par[p]}" if to_par[p] != 0 else "E" for p in players]
+            }, index=players)
+            st.table(results_df)
 
-        st.write("### 🧮 Player To-Par Stats")
-        to_par_df = pd.DataFrame({
-            "Score (To Par)": [f"{'+' if to_par[p] > 0 else ''}{to_par[p]}" if to_par[p] != 0 else "E" for p in players]
-        }, index=players)
-        st.table(to_par_df)
+            # Show Winner
+            winner = min(total_scores, key=total_scores.get)
+            st.success(f"🏆 Winner: **{winner}** with {total_scores[winner]} strokes ({'+' if to_par[winner] > 0 else ''}{to_par[winner]} to par)")
 
-    # --- Reset and History ---
-    st.divider()
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("🔄 Reset Round"):
-            st.session_state.clear()
-            st.experimental_rerun()
-    with col2:
-        if st.button("📜 View 365-Day History"):
-            st.session_state.view_history = True
+        except Exception as e:
+            st.error(f"Error saving scores: {e}")
 
-# --- 365-Day History ---
-if "view_history" in st.session_state and st.session_state.view_history:
-    st.subheader("📅 365-Day Golf Log")
-    if golf_data:
-        for day, info in golf_data.items():
-            st.write(f"### 📆 {day}")
-            if "players" in info and "scores" in info:
-                df_hist = pd.DataFrame(info["scores"])
-                df_hist.index = [f"Hole {i+1}" for i in range(18)]
-                df_hist.loc["Total"] = df_hist.sum()
-                st.dataframe(df_hist)
-            else:
-                st.write("_No data for this day yet._")
-    else:
-        st.info("No past data found yet. Play a round to start tracking!")
+    # --- View 365-Day History ---
+    if st.button("📜 View 365-Day History"):
+        st.subheader("📅 Saved Rounds (Past 365 Days)")
+        if golf_data:
+            for day, data in golf_data.items():
+                st.markdown(f"### 📆 {day}")
+                if "scores" in data:
+                    hist_df = pd.DataFrame(data["scores"])
+                    st.dataframe(hist_df)
+                    st.write("**Total Scores:**", data.get("total_scores", {}))
+                    st.write("**To Par:**", data.get("to_par", {}))
+        else:
+            st.info("No past rounds found yet.")
+
+    # --- Reset Round ---
+    if st.button("🔄 Reset Round"):
+        st.session_state.clear()
+        st.experimental_rerun()
